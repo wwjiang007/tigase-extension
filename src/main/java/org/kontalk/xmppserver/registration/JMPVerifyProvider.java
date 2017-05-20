@@ -18,25 +18,22 @@
 
 package org.kontalk.xmppserver.registration;
 
-import com.nexmo.verify.sdk.CheckResult;
-import com.nexmo.verify.sdk.NexmoVerifyClient;
-import com.nexmo.verify.sdk.VerifyResult;
-import org.xml.sax.SAXException;
+import org.kontalk.xmppserver.registration.jmp.CheckResult;
+import org.kontalk.xmppserver.registration.jmp.JmpVerifyClient;
+import org.kontalk.xmppserver.registration.jmp.VerifyResult;
 import tigase.db.TigaseDBException;
 import tigase.xmpp.XMPPResourceConnection;
 
-import javax.xml.parsers.ParserConfigurationException;
 import java.io.IOException;
 import java.util.Map;
-import java.util.logging.Logger;
 
 
 /**
- * Verification provider for Nexmo using verification API.
+ * Verification provider for JMP verification service.
+ * @see <a href="https://jmp.chat/">JMP - JIDs for Messaging with Phones</a>
  * @author Daniele Ricci
  */
-public class NexmoVerifyProvider extends AbstractSMSVerificationProvider {
-    private static Logger log = Logger.getLogger(NexmoVerifyProvider.class.getName());
+public class JMPVerifyProvider extends BrandedSMSVerificationProvider {
 
     private static final String ACK_INSTRUCTIONS = "A SMS containing a verification code will be sent to the phone number you provided.";
 
@@ -59,27 +56,22 @@ public class NexmoVerifyProvider extends AbstractSMSVerificationProvider {
 
     @Override
     public RegistrationRequest startVerification(String domain, String phoneNumber) throws IOException, VerificationRepository.AlreadyRegisteredException, TigaseDBException {
-        NexmoVerifyClient client;
+        JmpVerifyClient client;
 
-        try {
-            client = new NexmoVerifyClient(username, password);
-        }
-        catch (ParserConfigurationException e) {
-            throw new IOException("Error initializing Nexmo client", e);
-        }
+        client = new JmpVerifyClient(username, password);
 
         VerifyResult result;
 
         try {
             result = client.verify(phoneNumber, brand, senderId, VerificationRepository.VERIFICATION_CODE_LENGTH, null);
         }
-        catch (SAXException e) {
+        catch (IOException e) {
             throw new IOException("Error requesting verification", e);
         }
 
         if (result != null) {
             if (result.getStatus() == VerifyResult.STATUS_OK) {
-                return new NexmoVerifyRequest(result.getRequestId());
+                return new JMPVerifyRequest(result.getRequestId());
             }
             else {
                 throw new IOException("verification did not start (" + result.getErrorText() + ")");
@@ -96,22 +88,17 @@ public class NexmoVerifyProvider extends AbstractSMSVerificationProvider {
             return false;
         }
 
-        NexmoVerifyClient client;
+        JmpVerifyClient client;
 
-        try {
-            client = new NexmoVerifyClient(username, password);
-        }
-        catch (ParserConfigurationException e) {
-            throw new IOException("Error initializing Nexmo client", e);
-        }
+        client = new JmpVerifyClient(username, password);
 
         CheckResult result;
 
         try {
-            NexmoVerifyRequest myRequest = (NexmoVerifyRequest) request;
+            JMPVerifyRequest myRequest = (JMPVerifyRequest) request;
             result = client.check(myRequest.getId(), proof);
         }
-        catch (SAXException e) {
+        catch (IOException e) {
             throw new IOException("Error requesting verification", e);
         }
 
@@ -133,7 +120,7 @@ public class NexmoVerifyProvider extends AbstractSMSVerificationProvider {
 
     @Override
     public boolean supportsRequest(RegistrationRequest request) {
-        return request instanceof NexmoVerifyRequest;
+        return request instanceof JMPVerifyRequest;
     }
 
     @Override
@@ -141,9 +128,9 @@ public class NexmoVerifyProvider extends AbstractSMSVerificationProvider {
         return CHALLENGE_PIN;
     }
 
-    private static final class NexmoVerifyRequest implements RegistrationRequest {
+    private static final class JMPVerifyRequest implements RegistrationRequest {
         private final String id;
-        public NexmoVerifyRequest(String id) {
+        public JMPVerifyRequest(String id) {
             this.id = id;
         }
 
@@ -156,5 +143,4 @@ public class NexmoVerifyProvider extends AbstractSMSVerificationProvider {
             return id;
         }
     }
-
 }

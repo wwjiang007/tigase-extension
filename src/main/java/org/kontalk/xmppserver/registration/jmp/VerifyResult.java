@@ -16,28 +16,26 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-package org.kontalk.xmppserver;
+package org.kontalk.xmppserver.registration.jmp;
 
-import org.bouncycastle.jce.provider.BouncyCastleProvider;
 
 /**
- * Security provider initialization.
+ * Verification request result.
  * @author Daniele Ricci
  */
-public class Security {
+public class VerifyResult extends BaseResult {
 
-    public static final String PROVIDER = "BC";
+    private final String requestId;
 
-    private static Security instance;
-
-    private Security() {
-        java.security.Security.insertProviderAt(new BouncyCastleProvider(), 1);
+    protected VerifyResult(final int status,
+            final String requestId,
+            final String errorText) {
+        super(status, errorText);
+        this.requestId = requestId;
     }
 
-    public static void init() {
-        if (instance == null) {
-            instance = new Security();
-        }
+    public String getRequestId() {
+        return this.requestId;
     }
 
 }

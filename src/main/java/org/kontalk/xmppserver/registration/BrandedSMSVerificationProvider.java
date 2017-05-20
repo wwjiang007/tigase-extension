@@ -19,30 +19,33 @@
 package org.kontalk.xmppserver.registration;
 
 import tigase.db.TigaseDBException;
-import tigase.xmpp.BareJID;
 
+import java.util.Map;
 
 /**
- * Interface to a validation code repository.
+ * Base class for a branded SMS verification provider.
  * @author Daniele Ricci
  */
-public interface VerificationRepository {
+public abstract class BrandedSMSVerificationProvider extends AbstractSMSVerificationProvider {
 
-    /** Length of a verification code. */
-    public static final int VERIFICATION_CODE_LENGTH = 6;
+    protected String brandImage;
+    protected String brandLink;
 
-    /** Registers a new verification code for the given user. */
-    public String generateVerificationCode(BareJID jid) throws AlreadyRegisteredException, TigaseDBException;
+    @Override
+    public void init(Map<String, Object> settings) throws TigaseDBException {
+        super.init(settings);
+        brandImage = (String) settings.get("brand-image");
+        brandLink = (String) settings.get("brand-link");
+    }
 
-    /** Verifies and delete the given verification. */
-    public boolean verifyCode(BareJID jid, String code) throws TigaseDBException;
+    @Override
+    public String getBrandImage() {
+        return brandImage;
+    }
 
-    /** Purges old verification entries from storage. */
-    public void purge() throws TigaseDBException;
-
-    /** Exception thrown when the user has already tried to register recently. */
-    public static final class AlreadyRegisteredException extends Exception {
-        private static final long serialVersionUID = 1L;
+    @Override
+    public String getBrandLink() {
+        return brandLink;
     }
 
 }

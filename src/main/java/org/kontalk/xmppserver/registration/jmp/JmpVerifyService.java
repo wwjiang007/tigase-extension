@@ -16,28 +16,21 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-package org.kontalk.xmppserver;
+package org.kontalk.xmppserver.registration.jmp;
 
-import org.bouncycastle.jce.provider.BouncyCastleProvider;
+import retrofit2.Call;
+import retrofit2.http.GET;
+import retrofit2.http.Query;
 
-/**
- * Security provider initialization.
- * @author Daniele Ricci
- */
-public class Security {
 
-    public static final String PROVIDER = "BC";
+public interface JmpVerifyService {
 
-    private static Security instance;
+    @GET("verify")
+    Call<VerifyResult> verify(@Query("api_key") String apiKey, @Query("api_secret") String apiSecret,
+        @Query("number") String number, @Query("brand") String brand);
 
-    private Security() {
-        java.security.Security.insertProviderAt(new BouncyCastleProvider(), 1);
-    }
-
-    public static void init() {
-        if (instance == null) {
-            instance = new Security();
-        }
-    }
+    @GET("verify/check")
+    Call<CheckResult> check(@Query("api_key") String apiKey, @Query("api_secret") String apiSecret,
+        @Query("request_id") String requestId, @Query("code") String code);
 
 }

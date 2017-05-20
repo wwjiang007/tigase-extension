@@ -23,26 +23,33 @@ import tigase.xmpp.BareJID;
 
 
 /**
- * Interface to a validation code repository.
- * @author Daniele Ricci
+ * A dummy verification repository using a given value.
+ * @see #DEFAULT_CODE
  */
-public interface VerificationRepository {
+public class DummyVerificationRepository implements VerificationRepository {
+    private static final String DEFAULT_CODE = "123456";
 
-    /** Length of a verification code. */
-    public static final int VERIFICATION_CODE_LENGTH = 6;
+    private final String code;
 
-    /** Registers a new verification code for the given user. */
-    public String generateVerificationCode(BareJID jid) throws AlreadyRegisteredException, TigaseDBException;
-
-    /** Verifies and delete the given verification. */
-    public boolean verifyCode(BareJID jid, String code) throws TigaseDBException;
-
-    /** Purges old verification entries from storage. */
-    public void purge() throws TigaseDBException;
-
-    /** Exception thrown when the user has already tried to register recently. */
-    public static final class AlreadyRegisteredException extends Exception {
-        private static final long serialVersionUID = 1L;
+    public DummyVerificationRepository() {
+        this(null);
     }
 
+    public DummyVerificationRepository(String code) {
+        this.code = code != null ? code : DEFAULT_CODE;
+    }
+
+    @Override
+    public String generateVerificationCode(BareJID jid) throws AlreadyRegisteredException, TigaseDBException {
+        return code;
+    }
+
+    @Override
+    public boolean verifyCode(BareJID jid, String code) throws TigaseDBException {
+        return this.code.equals(code);
+    }
+
+    @Override
+    public void purge() throws TigaseDBException {
+    }
 }
