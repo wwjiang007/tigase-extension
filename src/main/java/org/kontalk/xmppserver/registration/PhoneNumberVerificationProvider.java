@@ -18,6 +18,7 @@
 
 package org.kontalk.xmppserver.registration;
 
+import tigase.conf.ConfigurationException;
 import tigase.db.TigaseDBException;
 import tigase.xmpp.XMPPResourceConnection;
 
@@ -38,7 +39,7 @@ public interface PhoneNumberVerificationProvider {
     /** Challenge the user with the caller ID presented in a user-initiated call to a given phone number. */
     public static final String CHALLENGE_CALLER_ID = "callerid";
 
-    public void init(Map<String, Object> settings) throws TigaseDBException;
+    public void init(Map<String, Object> settings) throws TigaseDBException, ConfigurationException;
 
     public String getSenderId();
 
@@ -66,8 +67,28 @@ public interface PhoneNumberVerificationProvider {
     /** The challenge type implemented by this provider. */
     public String getChallengeType();
 
-    /** The brand image logo for this provider, if any. */
-    public default String getBrandImage() {
+    /** The brand vector image logo for this provider, if any. */
+    public default String getBrandImageVector() {
+        return null;
+    }
+
+    /** The brand small image logo for this provider, if any. */
+    public default String getBrandImageSmall() {
+        return null;
+    }
+
+    /** The brand medium image logo for this provider, if any. */
+    public default String getBrandImageMedium() {
+        return null;
+    }
+
+    /** The brand large image logo for this provider, if any. */
+    public default String getBrandImageLarge() {
+        return null;
+    }
+
+    /** The brand HD image logo for this provider, if any. */
+    public default String getBrandImageHighDef() {
         return null;
     }
 

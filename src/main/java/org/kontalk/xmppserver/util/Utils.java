@@ -16,30 +16,22 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-package org.kontalk.xmppserver.registration;
-
-import tigase.conf.ConfigurationException;
-import tigase.db.TigaseDBException;
-
-import java.util.Map;
+package org.kontalk.xmppserver.util;
 
 
-/**
- * Base class for a SMS verification provider.
- * @author Daniele Ricci
- */
-public abstract class AbstractSMSVerificationProvider implements PhoneNumberVerificationProvider {
+public class Utils {
 
-    protected String senderId;
+    public static String generateRandomNumericString(int length) {
+        StringBuilder buffer = new StringBuilder();
+        final String characters = "1234567890";
 
-    @Override
-    public void init(Map<String, Object> settings) throws TigaseDBException, ConfigurationException {
-        senderId = (String) settings.get("sender");
-    }
+        int charactersLength = characters.length();
 
-    @Override
-    public String getSenderId() {
-        return senderId;
+        for (int i = 0; i < length; i++) {
+            double index = Math.random() * charactersLength;
+            buffer.append(characters.charAt((int) index));
+        }
+        return buffer.toString();
     }
 
 }

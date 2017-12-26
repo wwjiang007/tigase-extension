@@ -21,6 +21,7 @@ package org.kontalk.xmppserver;
 import com.google.i18n.phonenumbers.NumberParseException;
 import com.google.i18n.phonenumbers.PhoneNumberUtil;
 import com.google.i18n.phonenumbers.Phonenumber;
+import org.apache.commons.lang3.StringUtils;
 import org.bouncycastle.openpgp.PGPException;
 import org.bouncycastle.openpgp.PGPPublicKey;
 import org.bouncycastle.util.encoders.Hex;
@@ -34,9 +35,11 @@ import org.kontalk.xmppserver.probe.ProbeManager;
 import org.kontalk.xmppserver.registration.PhoneNumberVerificationProvider;
 import org.kontalk.xmppserver.registration.RegistrationRequest;
 import org.kontalk.xmppserver.registration.VerificationRepository;
+import org.kontalk.xmppserver.util.Utils;
 import org.kontalk.xmppserver.x509.X509Utils;
 import tigase.annotations.TODO;
 import tigase.auth.mechanisms.SaslEXTERNAL;
+import tigase.conf.ConfigurationException;
 import tigase.db.NonAuthUserRepository;
 import tigase.db.TigaseDBException;
 import tigase.db.UserExistsException;
@@ -72,7 +75,7 @@ import java.util.logging.Logger;
  * Inspired by the jabber:iq:register Tigase plugin.
  * @author Daniele Ricci
  */
-@TODO(note = "Support for multiple virtual hosts")
+@TODO(note = "Support for multiple virtual hosts; Expire private key tokens")
 public class KontalkIqRegister extends XMPPProcessor implements XMPPProcessorIfc, ProbeListener {
 
     private static final String[][] ELEMENTS = {Iq.IQ_QUERY_PATH};
@@ -85,6 +88,13 @@ public class KontalkIqRegister extends XMPPProcessor implements XMPPProcessorIfc
     private static final String IQ_FORM_ELEM_NAME = "x" ;
     private static final String IQ_FORM_XMLNS = "jabber:x:data";
     private static final String IQ_FORM_KONTALK_CODE_XMLNS = "http://kontalk.org/protocol/register#code";
+    private static final String IQ_FORM_KONTALK_PRIVATEKEY_XMLNS = "http://kontalk.org/protocol/register#privatekey";
+
+    // account management
+    private static final String IQ_ACCOUNT_ELEM_NAME = "account";
+    private static final String IQ_ACCOUNT_XMLNS = "http://kontalk.org/protocol/register#account";
+    private static final String IQ_ACCOUNT_PRIVATEKEY_ELEM_NAME = "privatekey";
+    private static final String IQ_ACCOUNT_TOKEN_ELEM_NAME = "token";
 
     // form fields
     private static final String FORM_FIELD_PHONE = "phone";
@@ -93,6 +103,7 @@ public class KontalkIqRegister extends XMPPProcessor implements XMPPProcessorIfc
     private static final String FORM_FIELD_REVOKED = "revoked";
     private static final String FORM_FIELD_FORCE = "force";
     private static final String FORM_FIELD_FALLBACK = "fallback";
+    private static final String FORM_FIELD_PRIVATEKEY = "privatekey";
     /** Form field to request a specific challenge type. */
     private static final String FORM_FIELD_CHALLENGE = "challenge";
 
@@ -105,9 +116,16 @@ public class KontalkIqRegister extends XMPPProcessor implements XMPPProcessorIfc
     private static final String ERROR_MALFORMED_REQUEST = "Please provide either a phone number or a public key and a verification code.";
     private static final String ERROR_INVALID_REVOKED = "Invalid revocation key.";
     private static final String ERROR_INVALID_PUBKEY = "Invalid public key.";
+    private static final String ERROR_INVALID_PRIVKEY_TOKEN = "Invalid private key token.";
+
+    private static final String NODE_PRIVATEKEY = "kontalk/privatekey";
+    private static final String KEY_PRIVATEKEY_DATA = "keydata";
+    private static final String KEY_PRIVATEKEY_JID = "jid";
 
     /** Default user expire time in seconds. */
     private static final long DEF_EXPIRE_SECONDS = TimeUnit.DAYS.toSeconds(30);
+
+    private static final int PRIVATE_KEY_ID_LEN = 40;
 
     private static final RosterFlat rosterUtil = new RosterFlat();
     private static final SessionManagerHandler loginHandler = new SessionManagerHandler() {
@@ -217,6 +235,9 @@ public class KontalkIqRegister extends XMPPProcessor implements XMPPProcessorIfc
             }
             catch (InstantiationException | IllegalAccessException e) {
                 throw new TigaseDBException("Unable to create provider instance for " + providerClassName);
+            }
+            catch (ConfigurationException e) {
+                throw new TigaseDBException("configuration error", e);
             }
         }
 
@@ -359,7 +380,8 @@ public class KontalkIqRegister extends XMPPProcessor implements XMPPProcessorIfc
                 StanzaType type = packet.getType();
 
                 switch (type) {
-                    case set:
+                    case set: {
+                        // FIXME handle all the cases according to the FORM_TYPE
 
                         Element query = request.getChild(Iq.QUERY_NAME, XMLNSS[0]);
                         Element formElement = (query != null) ? query.getChild(IQ_FORM_ELEM_NAME, IQ_FORM_XMLNS) : null;
@@ -427,41 +449,51 @@ public class KontalkIqRegister extends XMPPProcessor implements XMPPProcessorIfc
                                 break;
                             }
 
-                            // public key + revoked key: key rollover or upgrade from legacy
                             if (session.isAuthorized()) {
-                                String oldFingerprint;
-                                try {
-                                    oldFingerprint = KontalkAuth.getUserFingerprint(session);
+                                // private key storage
+                                String privateKey = form.getAsString(FORM_FIELD_PRIVATEKEY);
+                                if (privateKey != null) {
+                                    Packet response = storePrivateKey(session, repo, packet, privateKey);
+                                    packet.processedBy(ID);
+                                    results.offer(response);
+                                    break;
                                 }
-                                catch (UserNotFoundException e) {
-                                    oldFingerprint = null;
-                                    log.log(Level.INFO, "user not found: {0}", session);
-                                }
+                                else {
+                                    // public key + revoked key: key rollover or upgrade from legacy
+                                    String oldFingerprint;
+                                    try {
+                                        oldFingerprint = KontalkAuth.getUserFingerprint(session);
+                                    }
+                                    catch (UserNotFoundException e) {
+                                        oldFingerprint = null;
+                                        log.log(Level.INFO, "user not found: {0}", session);
+                                    }
 
-                                if (oldFingerprint != null) {
-                                    // do not use public key from certificate
-                                    publicKeyData = null;
+                                    if (oldFingerprint != null) {
+                                        // do not use public key from certificate
+                                        publicKeyData = null;
 
-                                    // user already has a key, check if revoked key fingerprint matches
-                                    String publicKey = form.getAsString(FORM_FIELD_PUBLICKEY);
-                                    String revoked = form.getAsString(FORM_FIELD_REVOKED);
-                                    if (publicKey != null && revoked != null) {
-                                        publicKeyData = Base64.decode(publicKey);
-                                        byte[] revokedData = Base64.decode(revoked);
-                                        KontalkKeyring keyring = getKeyring(session);
-                                        if (!keyring.revoked(revokedData, oldFingerprint)) {
-                                            // invalid revocation key
-                                            log.log(Level.INFO, "Invalid revocation key for user {0}", session.getBareJID());
-                                            results.offer(Authorization.FORBIDDEN.getResponseMessage(packet, ERROR_INVALID_REVOKED, false));
-                                            break;
+                                        // user already has a key, check if revoked key fingerprint matches
+                                        String publicKey = form.getAsString(FORM_FIELD_PUBLICKEY);
+                                        String revoked = form.getAsString(FORM_FIELD_REVOKED);
+                                        if (publicKey != null && revoked != null) {
+                                            publicKeyData = Base64.decode(publicKey);
+                                            byte[] revokedData = Base64.decode(revoked);
+                                            KontalkKeyring keyring = getKeyring(session);
+                                            if (!keyring.revoked(revokedData, oldFingerprint)) {
+                                                // invalid revocation key
+                                                log.log(Level.INFO, "Invalid revocation key for user {0}", session.getBareJID());
+                                                results.offer(Authorization.FORBIDDEN.getResponseMessage(packet, ERROR_INVALID_REVOKED, false));
+                                                break;
+                                            }
                                         }
                                     }
-                                }
 
-                                // user has no key or revocation key was fine, accept the new key
-                                if (publicKeyData != null) {
-                                    rolloverContinue(session, publicKeyData, packet, results);
-                                    break;
+                                    // user has no key or revocation key was fine, accept the new key
+                                    if (publicKeyData != null) {
+                                        rolloverContinue(session, publicKeyData, packet, results);
+                                        break;
+                                    }
                                 }
                             }
                         }
@@ -469,8 +501,26 @@ public class KontalkIqRegister extends XMPPProcessor implements XMPPProcessorIfc
                         // bad request
                         results.offer(Authorization.BAD_REQUEST.getResponseMessage(packet, ERROR_MALFORMED_REQUEST, true));
                         break;
+                    }
 
                     case get: {
+                        Element query = request.getChild(Iq.QUERY_NAME, XMLNSS[0]);
+                        Element account = query.getChild(IQ_ACCOUNT_ELEM_NAME, IQ_ACCOUNT_XMLNS);
+                        if (account != null) {
+                            String token = account.getChildCData(new String[] {
+                                    IQ_ACCOUNT_ELEM_NAME,
+                                    IQ_ACCOUNT_PRIVATEKEY_ELEM_NAME,
+                                    IQ_ACCOUNT_TOKEN_ELEM_NAME
+                            });
+
+                            if (StringUtils.isNotEmpty(token)) {
+                                Packet response = retrievePrivateKey(session, repo, packet, token);
+                                response.processedBy(ID);
+                                results.offer(response);
+                                break;
+                            }
+                        }
+
                         // instructions form
                         results.offer(buildInstructionsForm(packet));
                         break;
@@ -479,6 +529,20 @@ public class KontalkIqRegister extends XMPPProcessor implements XMPPProcessorIfc
                         results.offer(Authorization.BAD_REQUEST.getResponseMessage(packet, "Message type is incorrect", true));
 
                         break;
+                }
+            }
+            else {
+                if (session.isUserId(id)) {
+
+                    // It might be a registration request from transport for
+                    // example...
+                    Packet pack_res = packet.copyElementOnly();
+
+                    pack_res.setPacketTo(session.getConnectionId());
+                    results.offer(pack_res);
+                }
+                else {
+                    results.offer(packet.copyElementOnly());
                 }
             }
         }
@@ -623,7 +687,9 @@ public class KontalkIqRegister extends XMPPProcessor implements XMPPProcessorIfc
             if (senderId == null)
                 senderId = provider.getSenderId();
 
-            return packet.okResult(prepareSMSResponseForm(senderId, provider), 0);
+            // enable going to fallback only if we are not already falling back (and we have a fallback provider)
+            return packet.okResult(prepareSMSResponseForm(senderId, provider,
+                    fallbackProvider != null && provider != fallbackProvider), 0);
         }
         catch (IOException e) {
             // some kind of error
@@ -650,7 +716,7 @@ public class KontalkIqRegister extends XMPPProcessor implements XMPPProcessorIfc
         }
     }
 
-    private Element prepareSMSResponseForm(String from, PhoneNumberVerificationProvider provider) {
+    private Element prepareSMSResponseForm(String from, PhoneNumberVerificationProvider provider, boolean canFallback) {
         Element query = new Element("query", new String[] { "xmlns" }, XMLNSS);
         query.addChild(new Element("instructions", provider.getAckInstructions()));
         Form form = new Form("form", null, null);
@@ -659,9 +725,28 @@ public class KontalkIqRegister extends XMPPProcessor implements XMPPProcessorIfc
         form.addField(Field.fieldTextSingle("from", from, "Sender ID"));
         form.addField(Field.fieldTextSingle("challenge", provider.getChallengeType(), "Challenge type"));
 
-        String brandImage = provider.getBrandImage();
-        if (brandImage != null) {
-            form.addField(Field.fieldTextSingle("brand-image", brandImage, "Brand logo"));
+        if (canFallback)
+            form.addField(Field.fieldBoolean("can-fallback", true, "Whether client can fallback to another method or not"));
+
+        String brandImageVector = provider.getBrandImageVector();
+        if (brandImageVector != null) {
+            form.addField(Field.fieldTextSingle("brand-image-vector", brandImageVector, "Brand logo (vector)"));
+
+            String brandImageSmall = provider.getBrandImageSmall();
+            if (brandImageSmall != null)
+                form.addField(Field.fieldTextSingle("brand-image-small", brandImageSmall, "Brand logo (small)"));
+
+            String brandImageMedium = provider.getBrandImageMedium();
+            if (brandImageMedium != null)
+                form.addField(Field.fieldTextSingle("brand-image-medium", brandImageMedium, "Brand logo (medium)"));
+
+            String brandImageLarge = provider.getBrandImageLarge();
+            if (brandImageLarge != null)
+                form.addField(Field.fieldTextSingle("brand-image-large", brandImageLarge, "Brand logo (large)"));
+
+            String brandImageHighDef = provider.getBrandImageHighDef();
+            if (brandImageHighDef != null)
+                form.addField(Field.fieldTextSingle("brand-image-hd", brandImageHighDef, "Brand logo (HD)"));
 
             String brandLink = provider.getBrandLink();
             if (brandLink != null) {
@@ -722,6 +807,77 @@ public class KontalkIqRegister extends XMPPProcessor implements XMPPProcessorIfc
         else {
             results.offer(Authorization.FORBIDDEN.getResponseMessage(packet, ERROR_INVALID_PUBKEY, false));
         }
+    }
+
+    private Packet storePrivateKey(XMPPResourceConnection session, NonAuthUserRepository repo, Packet packet, String privateKeyB64)
+            throws NotAuthorizedException, TigaseDBException {
+        BareJID domain = session.getDomainAsJID().getBareJID();
+        String token = Utils.generateRandomNumericString(PRIVATE_KEY_ID_LEN).toUpperCase();
+        repo.putDomainTempData(domain, NODE_PRIVATEKEY + "/" + token, KEY_PRIVATEKEY_DATA, privateKeyB64);
+        repo.putDomainTempData(domain, NODE_PRIVATEKEY + "/" + token, KEY_PRIVATEKEY_JID, session.getBareJID().toString());
+        return packet.okResult(preparePrivateKeyStoredResponseForm(token), 0);
+    }
+
+    private Element preparePrivateKeyStoredResponseForm(String token) {
+        Element query = new Element("query", new String[] { "xmlns" }, XMLNSS);
+        Form form = new Form("form", null, null);
+
+        form.addField(Field.fieldHidden("FORM_TYPE", IQ_FORM_KONTALK_PRIVATEKEY_XMLNS));
+        form.addField(Field.fieldTextSingle("token", token, "Private key identification token"));
+
+        query.addChild(form.getElement());
+        return query;
+    }
+
+    private Packet retrievePrivateKey(XMPPResourceConnection session, NonAuthUserRepository repo, Packet packet, String token)
+            throws NotAuthorizedException, TigaseDBException, PacketErrorTypeException {
+
+        BareJID domain = session.getDomainAsJID().getBareJID();
+
+        // unique node in domain data formed by "privatekey" + the token
+        String privateKeyData = repo.getDomainTempData(domain, NODE_PRIVATEKEY + "/" + token, KEY_PRIVATEKEY_DATA, null);
+        String userId = repo.getDomainTempData(domain, NODE_PRIVATEKEY + "/" + token, KEY_PRIVATEKEY_JID, null);
+        if (StringUtils.isEmpty(privateKeyData) || StringUtils.isEmpty(userId))
+            return Authorization.NOT_AUTHORIZED.getResponseMessage(packet, ERROR_INVALID_PRIVKEY_TOKEN, false);
+
+        // load public key from keyring, we'll return it to the client as well
+        String fingerprint = KontalkAuth.getUserFingerprint(session, BareJID.bareJIDInstanceNS(userId));
+        if (fingerprint == null)
+            return Authorization.NOT_AUTHORIZED.getResponseMessage(packet, ERROR_INVALID_PRIVKEY_TOKEN, false);
+
+        String publicKeyData;
+        try {
+            KontalkKeyring keyring = KontalkKeyring.getInstance(domain.toString());
+            byte[] _publicKeyData = keyring.exportKey(fingerprint);
+            publicKeyData = Base64.encode(_publicKeyData);
+        }
+        catch (Exception e) {
+            log.log(Level.WARNING, "Public key for user not found or not valid: " + userId, e);
+            return Authorization.NOT_AUTHORIZED.getResponseMessage(packet, ERROR_INVALID_PRIVKEY_TOKEN, false);
+        }
+
+        // this is supposed to be a one-time request
+        repo.removeDomainTempData(domain, NODE_PRIVATEKEY + "/" + token, KEY_PRIVATEKEY_DATA);
+        repo.removeDomainTempData(domain, NODE_PRIVATEKEY + "/" + token, KEY_PRIVATEKEY_JID);
+
+        return packet.okResult(preparePrivateKeyResponseForm(privateKeyData, publicKeyData), 0);
+    }
+
+    private Element preparePrivateKeyResponseForm(String privateKeyData, String publicKeyData) {
+        Element query = new Element("query", new String[] { "xmlns" }, XMLNSS);
+        Element account = new Element(IQ_ACCOUNT_ELEM_NAME, new String[] { "xmlns" }, new String[] { IQ_ACCOUNT_XMLNS });
+        Element privateKey = new Element(IQ_ACCOUNT_PRIVATEKEY_ELEM_NAME);
+        Element privKeyElem = new Element("private");
+        Element pubKeyElem = new Element("public");
+
+        privKeyElem.setCData(privateKeyData);
+        pubKeyElem.setCData(publicKeyData);
+
+        privateKey.addChild(privKeyElem);
+        privateKey.addChild(pubKeyElem);
+        account.addChild(privateKey);
+        query.addChild(account);
+        return query;
     }
 
     private Packet errorUserExists(Packet packet) {
