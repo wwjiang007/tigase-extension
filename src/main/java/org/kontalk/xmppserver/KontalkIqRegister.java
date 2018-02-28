@@ -68,6 +68,8 @@ import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 
 /**
@@ -127,6 +129,16 @@ public class KontalkIqRegister extends XMPPProcessor implements XMPPProcessorIfc
 
     private static final int PRIVATE_KEY_ID_LEN = 40;
 
+    /** Pattern for connectionId resource: 127.0.0.1_5222_127.0.0.1_38492 */
+    // FIXME this is valid only for IPv4
+    private static final Pattern PATTERN_CLIENT_ADDRESS = Pattern.compile("^.*_.*_(.*)_.*$");
+
+    /** Number of registration attempts to consider to be throttling. After this, timestamps will be checked. */
+    private static final int THROTTLING_ATTEMPTS_THRESHOLD = 3;
+
+    /** Minimum delay for coming out of throttling. This is used after the number of attempts is greater than {@link #THROTTLING_ATTEMPTS_THRESHOLD}. */
+    private static final long THROTTLING_MIN_DELAY = TimeUnit.MINUTES.toMillis(30);
+
     private static final RosterFlat rosterUtil = new RosterFlat();
     private static final SessionManagerHandler loginHandler = new SessionManagerHandler() {
         @Override
@@ -172,6 +184,16 @@ public class KontalkIqRegister extends XMPPProcessor implements XMPPProcessorIfc
     private long statsInvalidRegistrations;
     private Map<BareJID, RegistrationRequest> requests;
 
+    /** Stores useful data for detecting registration throttling. */
+    private static final class LastRegisterRequest {
+        /** Number of requests so far. */
+        public int attempts;
+        /** Timestamp of last request. */
+        public long lastTimestamp;
+    }
+
+    private Map<String, LastRegisterRequest> throttlingRequests;
+
     private JDBCPresenceRepository userRepository = new JDBCPresenceRepository();
 
     @Override
@@ -182,6 +204,7 @@ public class KontalkIqRegister extends XMPPProcessor implements XMPPProcessorIfc
     @Override
     public void init(Map<String, Object> settings) throws TigaseDBException {
         requests = new HashMap<>();
+        throttlingRequests = new HashMap<>();
 
         // registration providers
         providers = new LinkedHashMap<>();
@@ -446,6 +469,9 @@ public class KontalkIqRegister extends XMPPProcessor implements XMPPProcessorIfc
                                     results.offer(Authorization.BAD_REQUEST.getResponseMessage(packet, ERROR_INVALID_CODE, true));
                                 }
 
+                                // clear throttling
+                                clearThrottling(jid, session.getConnectionId());
+
                                 break;
                             }
 
@@ -652,11 +678,12 @@ public class KontalkIqRegister extends XMPPProcessor implements XMPPProcessorIfc
             }
         }
         else {
-            return startVerification(session.getDomainAsJID().getDomain(), packet, jid, phone, fallback, challenge);
+            return startVerification(session.getDomainAsJID().getDomain(), packet,
+                    session.getConnectionId(), jid, phone, fallback, challenge);
         }
     }
 
-    private Packet startVerification(String domain, Packet packet, BareJID jid, String phone, boolean fallback, String challenge)
+    private Packet startVerification(String domain, Packet packet, JID connectionId, BareJID jid, String phone, boolean fallback, String challenge)
             throws TigaseDBException, PacketErrorTypeException {
         PhoneNumberVerificationProvider provider = null;
         if (challenge != null) {
@@ -669,12 +696,16 @@ public class KontalkIqRegister extends XMPPProcessor implements XMPPProcessorIfc
             provider = fallback && fallbackProvider != null ? fallbackProvider : defaultProvider;
         }
 
-        return startVerification(domain, packet, jid, phone, provider);
+        return startVerification(domain, packet, connectionId, jid, phone, provider);
     }
 
-    private Packet startVerification(String domain, Packet packet, BareJID jid, String phone, PhoneNumberVerificationProvider provider)
+    private Packet startVerification(String domain, Packet packet, JID connectionId, BareJID jid, String phone, PhoneNumberVerificationProvider provider)
             throws TigaseDBException, PacketErrorTypeException {
         try {
+            if (isThrottlingPhone(jid) || isThrottlingClient(connectionId)) {
+                throw new VerificationRepository.AlreadyRegisteredException();
+            }
+
             String senderId = null;
             RegistrationRequest request = provider.startVerification(domain, phone);
             if (request != null) {
@@ -698,7 +729,7 @@ public class KontalkIqRegister extends XMPPProcessor implements XMPPProcessorIfc
 
             if (fallbackProvider != null && provider != fallbackProvider) {
                 // we might try with the fallback provider now
-                return startVerification(domain, packet, jid, phone, fallbackProvider);
+                return startVerification(domain, packet, connectionId, jid, phone, fallbackProvider);
             }
             else {
                 return Authorization.NOT_ACCEPTABLE.getResponseMessage(packet, "Unable to verify number.", true);
@@ -714,6 +745,66 @@ public class KontalkIqRegister extends XMPPProcessor implements XMPPProcessorIfc
                     "Too many attempts.",
                     true);
         }
+    }
+
+    /** Returns true if the phone number has been trying to register too many times. */
+    private boolean isThrottlingPhone(BareJID jid) {
+        return isThrottling(jid.toString());
+    }
+
+    private boolean isThrottlingClient(JID connectionId) {
+        String host = extractHostFromConnectionId(connectionId);
+        if (StringUtils.isNotEmpty(host)) {
+            return isThrottling(host);
+        }
+
+        return false;
+    }
+
+    private boolean isThrottling(String id) {
+        long now = System.currentTimeMillis();
+        LastRegisterRequest request = throttlingRequests.get(id);
+        try {
+            if (request != null) {
+                if (request.attempts >= THROTTLING_ATTEMPTS_THRESHOLD) {
+                    return (now - request.lastTimestamp) < THROTTLING_MIN_DELAY;
+                }
+                else {
+                    request.attempts++;
+                    return false;
+                }
+            }
+            else {
+                request = new LastRegisterRequest();
+                request.attempts = 1;
+                throttlingRequests.put(id, request);
+
+                return false;
+            }
+        }
+        finally {
+            request.lastTimestamp = now;
+        }
+    }
+
+    private void clearThrottling(BareJID jid, JID connectionId) {
+        throttlingRequests.remove(jid.toString());
+
+        String host = extractHostFromConnectionId(connectionId);
+        if (StringUtils.isNotEmpty(host)) {
+            throttlingRequests.remove(host);
+        }
+    }
+
+    private String extractHostFromConnectionId(JID connectionId) {
+        String hostInfo = connectionId.getResource();
+        if (hostInfo != null) {
+            Matcher match = PATTERN_CLIENT_ADDRESS.matcher(hostInfo);
+            if (match.matches() && match.groupCount() > 0) {
+                return match.group(1);
+            }
+        }
+        return null;
     }
 
     private Element prepareSMSResponseForm(String from, PhoneNumberVerificationProvider provider, boolean canFallback) {
@@ -993,7 +1084,8 @@ public class KontalkIqRegister extends XMPPProcessor implements XMPPProcessorIfc
         else {
             SessionManager sm = (SessionManager) XMPPServer.getComponent("sess-man");
             try {
-                Packet result = startVerification(sm.getDefVHostItem().getDomain(), regInfo.packet, regInfo.jid, regInfo.phone, regInfo.fallback, regInfo.challenge);
+                Packet result = startVerification(sm.getDefVHostItem().getDomain(), regInfo.packet, regInfo.connectionId,
+                        regInfo.jid, regInfo.phone, regInfo.fallback, regInfo.challenge);
                 if (result != null) {
                     result.setPacketTo(regInfo.connectionId);
                     results.offer(result);
